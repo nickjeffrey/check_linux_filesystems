@@ -1,0 +1,136 @@
+#!/bin/bash
+
+
+# CHANGE LOG
+# ----------
+# 2025-03-14	njeffrey	Script created
+
+
+# USAGE
+# -----
+# It is assumed this script is executed locally on each monitored host via NRPE or check_by_ssh 
+# Example section from services.cfg:
+# define service{
+#        use                             generic-service
+#        hostgroup_name                  all_linux
+#        service_description             filesystems
+#        notification_period             24x7
+#        check_command                   check_by_ssh!"/usr/local/nagios/libexec/check_linux_filesystems"
+#        }
+
+
+
+# NOTES
+# -----
+# 
+# Nagios check to confirm all filesystems in /etc/fstab are currently mounted (tested on RHEL9, Ubuntu 22.04)
+#
+# Sample output for /etc/fstab
+#/dev/mapper/cs-root     /                       xfs     defaults        0 0
+#UUID=3733fa04-9ed7-4d8b-ae65-a4806e6a9568 /boot                   xfs     defaults        0 0
+#UUID=53FA-7324          /boot/efi               vfat    umask=0077,shortname=winnt 0 2
+#/dev/mapper/cs-swap     none                    swap    defaults        0 0
+#
+# Sample output for /proc/mounts
+#proc /proc proc rw,nosuid,nodev,noexec,relatime 0 0
+#sysfs /sys sysfs rw,seclabel,nosuid,nodev,noexec,relatime 0 0
+#devtmpfs /dev devtmpfs rw,seclabel,nosuid,size=4096k,nr_inodes=453833,mode=755,inode64 0 0
+#securityfs /sys/kernel/security securityfs rw,nosuid,nodev,noexec,relatime 0 0
+#tmpfs /dev/shm tmpfs rw,seclabel,nosuid,nodev,inode64 0 0
+#devpts /dev/pts devpts rw,seclabel,nosuid,noexec,relatime,gid=5,mode=620,ptmxmode=000 0 0
+#tmpfs /run tmpfs rw,seclabel,nosuid,nodev,size=734664k,nr_inodes=819200,mode=755,inode64 0 0
+#cgroup2 /sys/fs/cgroup cgroup2 rw,seclabel,nosuid,nodev,noexec,relatime,nsdelegate,memory_recursiveprot 0 0
+#pstore /sys/fs/pstore pstore rw,seclabel,nosuid,nodev,noexec,relatime 0 0
+#efivarfs /sys/firmware/efi/efivars efivarfs rw,nosuid,nodev,noexec,relatime 0 0
+#bpf /sys/fs/bpf bpf rw,nosuid,nodev,noexec,relatime,mode=700 0 0
+#/dev/mapper/cs-root / xfs rw,seclabel,relatime,attr2,inode64,logbufs=8,logbsize=32k,noquota 0 0
+#selinuxfs /sys/fs/selinux selinuxfs rw,nosuid,noexec,relatime 0 0
+#systemd-1 /proc/sys/fs/binfmt_misc autofs rw,relatime,fd=29,pgrp=1,timeout=0,minproto=5,maxproto=5,direct,pipe_ino=24768 0 0
+#mqueue /dev/mqueue mqueue rw,seclabel,nosuid,nodev,noexec,relatime 0 0
+#hugetlbfs /dev/hugepages hugetlbfs rw,seclabel,relatime,pagesize=2M 0 0
+#debugfs /sys/kernel/debug debugfs rw,seclabel,nosuid,nodev,noexec,relatime 0 0
+#tracefs /sys/kernel/tracing tracefs rw,seclabel,nosuid,nodev,noexec,relatime 0 0
+#fusectl /sys/fs/fuse/connections fusectl rw,nosuid,nodev,noexec,relatime 0 0
+#configfs /sys/kernel/config configfs rw,nosuid,nodev,noexec,relatime 0 0
+#none /run/credentials/systemd-sysctl.service ramfs ro,seclabel,nosuid,nodev,noexec,relatime,mode=700 0 0
+#none /run/credentials/systemd-sysusers.service ramfs ro,seclabel,nosuid,nodev,noexec,relatime,mode=700 0 0
+#none /run/credentials/systemd-tmpfiles-setup-dev.service ramfs ro,seclabel,nosuid,nodev,noexec,relatime,mode=700 0 0
+#/dev/sda2 /boot xfs rw,seclabel,relatime,attr2,inode64,logbufs=8,logbsize=32k,noquota 0 0
+#/dev/sda1 /boot/efi vfat rw,relatime,fmask=0077,dmask=0077,codepage=437,iocharset=ascii,shortname=winnt,errors=remount-ro 0 0
+#none /run/credentials/systemd-tmpfiles-setup.service ramfs ro,seclabel,nosuid,nodev,noexec,relatime,mode=700 0 0
+#sunrpc /var/lib/nfs/rpc_pipefs rpc_pipefs rw,relatime 0 0
+#tmpfs /run/user/0 tmpfs rw,seclabel,nosuid,nodev,relatime,size=367328k,nr_inodes=91832,mode=700,inode64 0 0
+#tmpfs /run/user/835801027 tmpfs rw,seclabel,nosuid,nodev,relatime,size=367328k,nr_inodes=91832,mode=700,uid=835801027,gid=835800513,inode64 0 0
+
+
+
+
+# Declare variables
+CHECK_NAME=filesystems
+OK=0
+WARN=1
+CRITICAL=2
+UNKNOWN=3
+AWK=/bin/awk
+
+# Perform sanity checks for required files
+if [ ! -f /proc/mounts ]; then
+    echo "UNKNOWN - /proc/mounts does not exist or is not readably by the current user. This may not be a Linux system."
+    exit $UNKNOWN
+fi
+if [ ! -f /etc/fstab ]; then
+    echo "UNKNOWN - /etc/fstab does not exist or is not readable by the current user. This may not be a Linux system."
+    exit $UNKNOWN
+fi
+test -f /bin/awk     && AWK=/bin/awk      #location on RHEL
+test -f /usr/bin/awk && AWK=/usr/bin/awk  #location on Ubuntu
+if [ ! -f $AWK ]; then
+    echo "UNKNOWN - $AWK does not exist or is not readable by the current user. Please check file locations."
+    exit $UNKNOWN
+fi
+
+
+
+# Get list of required mounts from /etc/fstab (excluding special mounts like swap, tmpfs, devpts, etc.)
+# NF (Non-Empty Line Check) → Excludes blank lines.
+# !/^#/ → Excludes commented lines starting with #.
+# Filter out non-essential mounts like swap, tmpfs, proc, sysfs, etc.
+REQUIRED_MOUNTS=$($AWK 'NF && !/^#/ && $3 !~ /swap|tmpfs|devpts|sysfs|proc|cgroup|efivarfs|debugfs|securityfs|selinuxfs|pstore|overlay/ {print $2}' /etc/fstab)
+
+
+# Get currently mounted filesystems (Extracting only valid mount points)
+CURRENTLY_MOUNTED=$($AWK 'NF && !/^#/ && !/^cgroup/ && !/^devtmpfs/ && !/^tmpfs/ && !/^proc/ && !/^sysfs/ && !/^systemd/ && !/^binfmt_misc/ && !/^devpts/ && !/^devpts/ && !/^debugfs/ && !/^hugetlbfs/ && !/^configfs/ && !/^debugfs/ && !/^securityfs/ && !/^selinuxfs/  && !/^tracefs/  && !/^none/ && !/^sunrpc/ && !/^efivarfs/ && !/^bpf/ && !/^pstore/ && !/^mqueue/ && !/^fusectl/ && !/^gvfsd-fuse/ && !/^nsfs/ && !/^nfsd/ && !/^udev/ && !/^\/dev\/loop/ {print $2}' /proc/mounts)
+
+
+# Debugging output: Show what we are extracting
+#echo "Required Mounts: $REQUIRED_MOUNTS"
+#echo "Currently Mounted: $CURRENTLY_MOUNTED"
+
+# Track missing mounts
+MISSING_MOUNTS=()
+
+# Check if each required mount is present
+for mount in $REQUIRED_MOUNTS; do
+    if ! echo "$CURRENTLY_MOUNTED" | grep -Fxq "$mount"; then
+        MISSING_MOUNTS+=("$mount")
+    fi
+done
+
+# Nagios output format
+if [ ${#MISSING_MOUNTS[@]} -eq 0 ]; then
+    # note that we use `echo $CURRENTLY_MOUNTED` to remove the newline characters between each mount point
+    echo "$CHECK_NAME OK - All required filesystems from /etc/fstab are mounted: `echo $CURRENTLY_MOUNTED`"
+    exit $OK
+else
+    echo "$CHECK_NAME CRITICAL - Missing filesystem mounts: ${MISSING_MOUNTS[*]}"
+    exit $CRITCAL
+fi
+
+
+
+
+
+
+
+
+
